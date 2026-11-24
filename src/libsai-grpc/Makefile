@@ -6,6 +6,13 @@ GRPC_OBJ = $(patsubst dataplane/proto/sai/%.proto, dataplane/proto/sai/%.grpc.pb
 SAI_SRC = $(wildcard dataplane/standalone/sai/*.cc)
 SAI_OBJ = $(patsubst dataplane/standalone/sai/%.cc, dataplane/standalone/sai/%.o, $(SAI_SRC))
 
+LEMMING_SRC_DIR := $(CURDIR)/lemming
+LUCIUS_BAZEL_TARGET := //dataplane/standalone/lucius:lucius
+
+.PHONY: lucius-bin
+lucius-bin:
+	cd $(LEMMING_SRC_DIR) && bazel build $(LUCIUS_BAZEL_TARGET)
+
 all: lucius-libsai-trixie
 
 $(PROTO_SRC) $(PROTO_GRPC_SRC) &:
@@ -33,7 +40,11 @@ $(ENTRYPOINT_OBJ): entrypoint.cc $(PROTO_SRC)
 libsai.so: $(PROTO_OBJ) $(GRPC_OBJ) $(SAI_OBJ) $(ENTRYPOINT_OBJ)
 	g++ -fPIC -o libsai.so -shared $(ENTRYPOINT_OBJ) dataplane/proto/sai/*.o dataplane/standalone/sai/*.o -lglog -lprotobuf -lgrpc++ -I . -I external/com_github_opencomputeproject_sai -I external/com_github_opencomputeproject_sai/inc -I external/com_github_opencomputeproject_sai/experimental
 
-lucius-libsai-trixie:
+check-docker:
+	@if ! docker info >/dev/null 2>&1; then \
+		echo "Docker daemon not running. Attempting to start dockerd..."; \
+		sudo service docker start >/dev/null 2>&1 || nohup dockerd >/tmp/dockerd.log 2>&1 & \
+	fi;
 # Wait for docker daemon to come up. Takes 30-45 seconds in trixie
 	@wait_for_docker=0; \
 	while [ $$wait_for_docker -lt 40 ]; do \
@@ -41,12 +52,21 @@ lucius-libsai-trixie:
 		sleep 3; \
 		wait_for_docker=$$((wait_for_docker + 1)); \
 	done; \
-	echo "Wait of $$((wait_for_docker * 3)) seconds for docker"; \
+	echo "Wait of $$((wait_for_docker * 3)) seconds for docker";
 
+lucius-libsai-trixie: check-docker
 	DOCKER_BUILDKIT=1 docker build . -f Dockerfile.saibuilder -t lemming-libsai:latest
+	docker rm -f libsai-temp 2>/dev/null || true
 	docker create --name libsai-temp lemming-libsai:latest
 	docker cp libsai-temp:/build/libsai.so ./libsai.so
 	docker rm libsai-temp
+
+pkthandler-trixie: check-docker
+	DOCKER_BUILDKIT=1 docker build -f Dockerfile.pkthandler -t lemming-pkthandler:latest ..
+	docker rm -f pkthandler-temp 2>/dev/null || true
+	docker create --name pkthandler-temp lemming-pkthandler:latest
+	docker cp pkthandler-temp:/build/pkthandler ./pkthandler
+	docker rm pkthandler-temp
 
 install: lucius-libsai-trixie
 	echo "Inside lucius_sai"
@@ -56,6 +76,6 @@ install: lucius-libsai-trixie
 clean:
 	-rm -f dataplane/proto/sai/*.cc dataplane/proto/sai/*.h dataplane/proto/sai/*.o
 	-rm -f dataplane/standalone/sai/*.o
-	-rm -f libsai.so
+	-rm -f libsai.so pkthandler
 
-.PHONY: clean install
+.PHONY: clean install check-docker lucius-libsai-trixie lucius-bin pkthandler-trixie
